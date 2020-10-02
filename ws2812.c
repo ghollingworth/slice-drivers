@@ -18,37 +18,6 @@
  * Note, this uses the same PWM hardware as the standard audio output on the Pi
  * so you cannot use both simultaneously.
  *
- * http://www.raspberrypi.org/documentation/configuration/pin-configuration.md
- *
- * (Copy the bit from /dts-v1/; through to the end...  This will contain the pin
- * configuration for all the Raspberry Pi versions (since they are different.
- * You can get rid of the ones you don't care about.  Next alter the PWM0 output
- * you want to use.
- *
- * http://www.raspberrypi.org/documentation/hardware/raspberrypi/bcm2835/BCM2835-ARM-Peripherals.pdf
- *
- * The link above will help understand what the GPIOs can do, check out page 102
- * You can use: GPIO12, GPIO18 or GPIO40, so for the Slice board we use GPIO40 so
- * we have the following in the dts file
- *
- * pin@p40 {
- *  function = "pwm";
- *  termination = "no_pulling";
- * };
- *
- * And at the bottom of the dts file, although still in the 'videocore' block we
- * have:
- *
- * clock_setup {
- *  clock@PWM { freq = <2400000>; };
- * };
- *
- * To check whether the changes are correct you can use 'vcgencmd measure_clock 25'
- * This should return the value 2400000
- *
- * Also if you use wiringPi then you can do 'gpio readall' to check that the pin
- * alternate setting is set correctly.
- *
  */
 
 #include <linux/kernel.h>
@@ -70,6 +39,7 @@
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/gpio/consumer.h>
+#include <linux/clk.h>
 #include <asm-generic/ioctl.h>
 
 #define DRIVER_NAME "ws2812"
@@ -79,6 +49,7 @@ struct ws2812_state {
 	struct cdev            cdev;
 	struct class *         cl;
 	struct dma_chan *      dma_chan;
+        struct clk *           clk;
 	dma_addr_t dma_addr;
 
 	void __iomem *         ioaddr;
@@ -107,8 +78,8 @@ struct ws2812_state {
  */
 #define BYTES_PER_LED 12
 
-// Number of 2.4MHz bits in 50us to create a reset condition
-#define RESET_BYTES ((50 * 24) / 80)
+// Number of 3.2MHz bits in 80us to create a reset condition
+#define RESET_BYTES (256/8)
 
 #define PWM_CTL 0x0
 #define PWM_STA 0x4
@@ -235,7 +206,6 @@ static int ws2812_open(struct inode *inode, struct file *file)
 	state  = container_of(inode->i_cdev, struct ws2812_state, cdev);
 
 	file->private_data = state;
-
 	return 0;
 }
 
@@ -247,7 +217,24 @@ unsigned char gamma_(unsigned char brightness, unsigned char val)
 {
 	int bright = val;
 	unsigned char GammaE[] = {
-	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+   /* 1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,
+    1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,
+    1,  1,  1,  1,  1,  1,  1,  1,  1,  2,  2,  2,  2,  2,  2,  2,
+    2,  3,  3,  3,  3,  3,  3,  3,  4,  4,  4,  4,  4,  5,  5,  5,
+    5,  6,  6,  6,  6,  7,  7,  7,  7,  8,  8,  8,  9,  9,  9, 10,
+   10, 10, 11, 11, 11, 12, 12, 13, 13, 13, 14, 14, 15, 15, 16, 16,
+   17, 17, 18, 18, 19, 19, 20, 20, 21, 21, 22, 22, 23, 24, 24, 25,
+   25, 26, 27, 27, 28, 29, 29, 30, 31, 32, 32, 33, 34, 35, 35, 36,
+   37, 38, 39, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 50,
+   51, 52, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 66, 67, 68,
+   69, 70, 72, 73, 74, 75, 77, 78, 79, 81, 82, 83, 85, 86, 87, 89,
+   90, 92, 93, 95, 96, 98, 99,101,102,104,105,107,109,110,112,114,
+  115,117,119,120,122,124,126,127,129,131,133,135,137,138,140,142,
+  144,146,148,150,152,154,156,158,160,162,164,167,169,171,173,175,
+  177,180,182,184,186,189,191,193,196,198,200,203,205,208,210,213,
+  215,218,220,223,225,228,231,233,236,239,241,244,247,249,252,255 
+*/
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 	0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2,
 	2, 2, 2, 3, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5,
 	6, 6, 6, 7, 7, 7, 8, 8, 8, 9, 9, 9, 10, 10, 11, 11,
@@ -262,22 +249,22 @@ unsigned char gamma_(unsigned char brightness, unsigned char val)
 	135,137,138,140,142,143,145,146,148,150,151,153,155,157,158,160,
 	162,163,165,167,169,170,172,174,176,178,179,181,183,185,187,189,
 	191,193,194,196,198,200,202,204,206,208,210,212,214,216,218,220,
-	222,224,227,229,231,233,235,237,239,241,244,246,248,250,252,255};
+	222,224,227,229,231,233,235,237,239,241,244,246,248,250,252,255
+    
+        };
 	bright = (bright * brightness) / 255;
 	return GammaE[bright];
 }
 
 // LED serial output
 // 4 bits make up a single bit of the output
-// 1 1 1 0  -- 1
+// 1 1 0 0  -- 1
 // 1 0 0 0  -- 0
 //
-// Plus require a space of 50 microseconds for reset
-// 24 bits per led
+// Plus require a space of 80 microseconds for reset
+// at 3.2MHz = 256 cycles == 32 bytes
 //
-// (24 * 4) / 8 = 12 bytes per led
-//
-//  red = 0xff0000 == 0xeeeeeeee 0x88888888 0x88888888
+//  red = 0xff0000 == 0xcccccccc 0x88888888 0x88888888
 unsigned char * led_encode(struct ws2812_state * state, int rgb, unsigned char *buf)
 {
 	int i;
@@ -292,9 +279,9 @@ unsigned char * led_encode(struct ws2812_state * state, int rgb, unsigned char *
 		switch(rearrange & 3)
 		{
 			case 0: *buf++ = 0x88; break;
-			case 1: *buf++ = 0x8e; break;
-			case 2: *buf++ = 0xe8; break;
-			case 3: *buf++ = 0xee; break;
+			case 1: *buf++ = 0x8c; break;
+			case 2: *buf++ = 0xc8; break;
+			case 3: *buf++ = 0xcc; break;
 		}
 		rearrange >>= 2;
 	}
@@ -310,12 +297,12 @@ unsigned char * led_encode(struct ws2812_state * state, int rgb, unsigned char *
  */
 ssize_t ws2812_write(struct file *filp, const char __user *buf, size_t count, loff_t *pos)
 {
-	int32_t *p_rgb;
-	int8_t * p_buffer;
+	int32_t * p_rgb;
+	uint8_t * p_buffer;
 	int i, length, num_leds;
 	struct ws2812_state * state = (struct ws2812_state *) filp->private_data;
 
-	num_leds = min(count/4, state->num_leds);
+	num_leds = count/4 < state->num_leds ? count/4 : state->num_leds;
 
 	if(copy_from_user(state->pixbuf, buf, num_leds * 4))
 		return -EFAULT;
@@ -325,14 +312,14 @@ ssize_t ws2812_write(struct file *filp, const char __user *buf, size_t count, lo
 	for(i = 0; i < num_leds; i++)
 		p_buffer = led_encode(state, *p_rgb++, p_buffer);
 
+
 	/* Fill rest with '0' */
 	memset(p_buffer, 0x00, RESET_BYTES);
 
-	length = (int) p_buffer - (int) state->buffer + RESET_BYTES;
+	length = (int) (p_buffer - state->buffer) + RESET_BYTES;
 
 	/* Setup DMA engine */
 	issue_dma(state, state->buffer, length);
-
 	return count;
 }
 
@@ -352,6 +339,7 @@ struct file_operations ws2812_fops = {
 static int ws2812_probe(struct platform_device *pdev)
 {
 	int ret;
+	u32 rate;
 	struct device *dev = &pdev->dev;
 	struct device_node *node = dev->of_node;
 	struct ws2812_state * state;
@@ -387,7 +375,7 @@ static int ws2812_probe(struct platform_device *pdev)
 		pr_err("Unable to create chrdev region");
 		goto fail_malloc;
 	}
-	if((state->cl = class_create(THIS_MODULE, "ws2812")) == NULL)
+	if((state->cl = class_create(THIS_MODULE, "chardrv")) == NULL)
 	{
 		unregister_chrdev_region(devid, 1);
 		pr_err("Unable to create class ws2812");
@@ -413,11 +401,13 @@ static int ws2812_probe(struct platform_device *pdev)
 
 	/* get parameters from device tree */
 	of_property_read_u32(node,
-	                     "rpi,invert",
+	                     "invert",
 	                     &state->invert);
 	of_property_read_u32(node,
-	                     "rpi,num_leds",
+	                     "num_leds",
 	                     &state->num_leds);
+
+	pr_err("num_leds = %d\n", state->num_leds);
 
 	state->pixbuf = kmalloc(state->num_leds * sizeof(int), GFP_KERNEL);
 	if(state->pixbuf == NULL)
@@ -433,7 +423,6 @@ static int ws2812_probe(struct platform_device *pdev)
 		goto fail_pixbuf;
 	}
 	state->phys_addr = be32_to_cpup(addr);
-	pr_err("bus_addr = %pa\n", &state->phys_addr);
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	state->ioaddr = devm_ioremap_resource(&pdev->dev, res);
@@ -441,8 +430,6 @@ static int ws2812_probe(struct platform_device *pdev)
                 pr_err("Failed to get register resource\n");
 		goto fail_pixbuf;
 	}
-
-	pr_err("ioaddr = 0x%x\n", (int) state->ioaddr);
 
 	state->buffer = kmalloc(state->num_leds * BYTES_PER_LED + RESET_BYTES, GFP_KERNEL);
 	if(state->buffer == NULL)
@@ -465,13 +452,19 @@ static int ws2812_probe(struct platform_device *pdev)
 		pr_err("Can't allocate DMA channel\n");
 		goto fail_dma_init;
 	}
+
+	// Get the clock channel
+	state->clk = devm_clk_get(dev, NULL);
+	of_property_read_u32(node, "clock-frequency", &rate);
+	clk_set_rate(state->clk, rate);
+	clk_prepare(state->clk);
+
 	pwm_init(state);
 
 	// Enable the LED power
 	state->led_en = devm_gpiod_get(dev, "led-en", GPIOD_OUT_HIGH);
 
 	clear_leds(state);
-
 	return 0;
 fail_dma_init:
 	dma_release_channel(state->dma_chan);
@@ -501,6 +494,7 @@ static int ws2812_remove(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, NULL);
 
+	devm_clk_put(&pdev->dev, state->clk);
 	dma_release_channel(state->dma_chan);
 	kfree(state->buffer);
 	kfree(state->pixbuf);
