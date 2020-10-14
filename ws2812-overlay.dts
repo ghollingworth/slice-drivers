@@ -41,7 +41,7 @@
         led-en-gpios = <&gpio 43 0>;
 
         invert = <0>;
-        num_leds = <25>;
+        num_leds = <9>;
 
         status = "okay";
 
