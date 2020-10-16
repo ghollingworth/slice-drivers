@@ -1,5 +1,4 @@
 obj-m += ws2812.o
-obj-m += slice.o
 
 KVERSION := $(shell uname -r)
 KDIR := /lib/modules/$(KVERSION)/build

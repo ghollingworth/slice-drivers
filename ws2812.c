@@ -67,12 +67,13 @@ struct ws2812_state {
     u32                    invert;
     // Total number of LEDs
     u32                    num_leds;
-    // 1 - Choose WS2812 gamma curve
-    // 0 - SK6812
-    u32                    ws_gamma;
-    // Reset bits, number of bits of the output clock to create a reset
-    // condition
-    u32                    reset_bits;
+    // LED type
+    // 0 - WS2812
+    // 1 - SK6812
+    u32                    led_type;
+    // Reset bytes, number of bits (in bytes) of the output clock to
+    // create a reset condition
+    u32                    reset_bytes;
 };
 
 /* Each LED is controlled with a 24 bit RGB value
@@ -81,9 +82,6 @@ struct ws2812_state {
  * of PWM output
  */
 #define BYTES_PER_LED 12
-
-// Number of 3.2MHz bits in 80us to create a reset condition
-#define RESET_BYTES (256/8)
 
 #define PWM_CTL 0x0
 #define PWM_STA 0x4
@@ -152,7 +150,6 @@ void ws2812_callback(void * param)
 
     dma_unmap_single(state->dev, state->dma_addr, state->num_leds * BYTES_PER_LED,
                      DMA_TO_DEVICE);
-pr_err("CALLBACK");
 }
 
 /*
@@ -185,7 +182,6 @@ int issue_dma(struct ws2812_state * state, uint8_t *buffer, int length)
     desc->callback_param = state;
     dmaengine_submit(desc);
     dma_async_issue_pending(state->dma_chan);
-pr_err("ISSUE");
 
     return 0;
 }
@@ -197,10 +193,10 @@ int clear_leds(struct ws2812_state * state)
 
     for(i = 0; i < state->num_leds * BYTES_PER_LED; i++)
         state->buffer[i] = 0x88;
-    for(i = 0; i < RESET_BYTES; i++)
+    for(i = 0; i < state->reset_bytes; i++)
         state->buffer[state->num_leds * BYTES_PER_LED + i] = 0;
 
-    issue_dma(state, state->buffer, state->num_leds * BYTES_PER_LED + RESET_BYTES);
+    issue_dma(state, state->buffer, state->num_leds * BYTES_PER_LED + state->reset_bytes);
 
     return 0;
 }
@@ -209,7 +205,6 @@ static int ws2812_open(struct inode *inode, struct file *file)
 {
     struct ws2812_state * state;
     state  = container_of(inode->i_cdev, struct ws2812_state, cdev);
-pr_err("OPEN");
 
     file->private_data = state;
     return 0;
@@ -265,9 +260,12 @@ unsigned char gamma_(int ws, unsigned char brightness, unsigned char val)
 
 // LED serial output
 // 4 bits make up a single bit of the output
+// SK6812
 // 1 1 0 0  -- 1
 // 1 0 0 0  -- 0
-//
+// WS2812
+// 1 1 1 0  -- 1
+// 1 0 0 0  -- 0
 // Plus require a space of 80 microseconds for reset
 // at 3.2MHz = 256 cycles == 32 bytes
 //
@@ -275,9 +273,9 @@ unsigned char gamma_(int ws, unsigned char brightness, unsigned char val)
 unsigned char * led_encode(struct ws2812_state * state, int rgb, unsigned char *buf)
 {
     int i;
-    unsigned char red = gamma_(state->ws_gamma, state->brightness, rgb >> 8);
-    unsigned char blu = gamma_(state->ws_gamma, state->brightness, rgb);
-    unsigned char grn = gamma_(state->ws_gamma, state->brightness, rgb >> 16);
+    unsigned char red = gamma_(state->led_type, state->brightness, rgb >> 8);
+    unsigned char blu = gamma_(state->led_type, state->brightness, rgb);
+    unsigned char grn = gamma_(state->led_type, state->brightness, rgb >> 16);
     int rearrange =  red +
             (blu << 8) +
             (grn << 16);
@@ -321,9 +319,9 @@ ssize_t ws2812_write(struct file *filp, const char __user *buf, size_t count, lo
 
 
     /* Fill rest with '0' */
-    memset(p_buffer, 0x00, RESET_BYTES);
+    memset(p_buffer, 0x00, state->reset_bytes);
 
-    length = (int) (p_buffer - state->buffer) + RESET_BYTES;
+    length = (int) (p_buffer - state->buffer) + state->reset_bytes;
 
     /* Setup DMA engine */
     issue_dma(state, state->buffer, length);
@@ -375,7 +373,7 @@ static int ws2812_probe(struct platform_device *pdev)
 
     state->dev = dev;
     state->brightness = 255;
-    state->ws_gamma = 1;
+    state->led_type = 1;
 
     // Create character device interface /dev/ws2812
     if(alloc_chrdev_region(&devid, 0, 1, "ws2812") < 0)
@@ -416,10 +414,13 @@ static int ws2812_probe(struct platform_device *pdev)
                          &state->num_leds);
     pr_err("num_leds = %d\n", state->num_leds);
     of_property_read_u32(node,
-                         "ws2812",
-                         &state->ws_gamma);
-
-
+                         "led_type",
+                         &state->led_type);
+                         
+    of_property_read_u32(node, "clock-frequency", &rate);
+    // Need at least 80us of zero to create a reset condition
+    state->reset_bytes = (80 * (rate/1000)) / 1000;
+    
     state->pixbuf = kmalloc(state->num_leds * sizeof(int), GFP_KERNEL);
     if(state->pixbuf == NULL)
     {
@@ -445,7 +446,7 @@ static int ws2812_probe(struct platform_device *pdev)
     }
     pr_err("num_leds = %d\n", state->num_leds);
 
-    state->buffer = kmalloc(state->num_leds * BYTES_PER_LED + RESET_BYTES, GFP_KERNEL);
+    state->buffer = kmalloc(state->num_leds * BYTES_PER_LED + state->reset_bytes, GFP_KERNEL);
     if(state->buffer == NULL)
     {
         pr_err("Failed to allocate internal buffer\n");
